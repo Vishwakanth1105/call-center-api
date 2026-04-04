@@ -1,3 +1,60 @@
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+import os
+import base64
+import tempfile
+from groq import Groq
+import google.generativeai as genai
+import json
+import re
+
+app = Flask(__name__)
+CORS(app)  # Enable CORS for all routes
+
+# Configuration
+API_KEY = os.environ.get('API_KEY', 'sk_track3_987654321')
+GROQ_API_KEY = os.environ.get('GROQ_API_KEY', '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')
+GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', 'AIzaSyA6nmuCv43jMkSWSb1qngc4yrnMtmY4Mu0')
+
+# Initialize clients
+groq_client = Groq(api_key=GROQ_API_KEY)
+genai.configure(api_key=GEMINI_API_KEY)
+
+def verify_api_key():
+    """Verify API key from request header"""
+    api_key = request.headers.get('x-api-key')
+    if not api_key or api_key != API_KEY:
+        return False
+    return True
+
+def transcribe_audio(audio_base64, language):
+    """Transcribe audio using Groq Whisper API"""
+    try:
+        # Decode base64 to binary
+        audio_data = base64.b64decode(audio_base64)
+        
+        # Save to temporary file
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.mp3') as temp_audio:
+            temp_audio.write(audio_data)
+            temp_audio_path = temp_audio.name
+        
+        # Transcribe using Groq
+        with open(temp_audio_path, 'rb') as audio_file:
+            transcription = groq_client.audio.transcriptions.create(
+                file=audio_file,
+                model="whisper-large-v3",
+                response_format="json",
+                language="ta" if language.lower() == "tamil" else "hi"
+            )
+        
+        # Clean up temp file
+        os.unlink(temp_audio_path)
+        
+        return transcription.text
+    
+    except Exception as e:
+        raise Exception(f"Transcription error: {str(e)}")
+
 def analyze_with_gemini(transcript, language):
     """Analyze transcript using Gemini for SOP validation, analytics, and keywords"""
     
@@ -39,7 +96,8 @@ Critical Rules:
 """
 
     try:
-        response = model.generate_content(prompt)  # ✅ CHANGED FROM gemini_model to model
+        model = genai.GenerativeModel('gemini-1.5-flash-latest')
+        response = model.generate_content(prompt)
         response_text = response.text.strip()
         
         # Remove markdown code blocks if present
@@ -76,3 +134,62 @@ Critical Rules:
         raise Exception(f"Gemini returned invalid JSON: {str(e)}")
     except Exception as e:
         raise Exception(f"Gemini analysis error: {str(e)}")
+
+@app.route('/api/call-analytics', methods=['POST'])
+def call_analytics():
+    """Main API endpoint for call analytics"""
+    
+    # Verify API key
+    if not verify_api_key():
+        return jsonify({"error": "Unauthorized"}), 401
+    
+    try:
+        # Get request data
+        data = request.get_json()
+        
+        if not data:
+            return jsonify({"error": "Invalid request body"}), 400
+        
+        language = data.get('language', 'Tamil')
+        audio_format = data.get('audioFormat', 'mp3')
+        audio_base64 = data.get('audioBase64')
+        
+        if not audio_base64:
+            return jsonify({"error": "Missing audioBase64 field"}), 400
+        
+        # Step 1: Transcribe audio
+        transcript = transcribe_audio(audio_base64, language)
+        
+        if not transcript or len(transcript.strip()) == 0:
+            return jsonify({"error": "Transcription failed or empty"}), 500
+        
+        # Step 2: Analyze with Gemini
+        analysis = analyze_with_gemini(transcript, language)
+        
+        # Step 3: Build response
+        response = {
+            "status": "success",
+            "language": language,
+            "transcript": transcript,
+            "summary": analysis.get("summary", ""),
+            "sop_validation": analysis.get("sop_validation", {}),
+            "analytics": analysis.get("analytics", {}),
+            "keywords": analysis.get("keywords", [])
+        }
+        
+        return jsonify(response), 200
+    
+    except Exception as e:
+        return jsonify({
+            "status": "error",
+            "error": str(e)
+        }), 500
+
+@app.route('/health', methods=['GET'])
+def health():
+    """Health check endpoint"""
+    return jsonify({"status": "healthy"}), 200
+
+if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port, debug=False)
