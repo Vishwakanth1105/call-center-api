@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: call-center-compliance-api
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --workers 2 --timeout 120
+    envVars:
+      - key: API_KEY
+        value: sk_track3_987654321
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
