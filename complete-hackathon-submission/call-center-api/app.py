@@ -4,32 +4,24 @@ import os
 import base64
 import tempfile
 from groq import Groq
-import google.generativeai as genai
 import json
 import re
 
 app = Flask(__name__)
 CORS(app)
 
-# Configuration from environment variables
 API_KEY = os.environ.get('API_KEY')
 GROQ_API_KEY = os.environ.get('GROQ_API_KEY')
-GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
 
-# Initialize clients
 groq_client = Groq(api_key=GROQ_API_KEY)
-genai.configure(api_key=GEMINI_API_KEY)
 
 def verify_api_key():
-    """Verify API key from request header"""
     api_key = request.headers.get('x-api-key')
     return api_key == API_KEY if api_key and API_KEY else False
 
 def transcribe_audio(audio_base64, language):
-    """Transcribe audio using Groq Whisper API"""
     try:
         audio_data = base64.b64decode(audio_base64)
-        
         with tempfile.NamedTemporaryFile(delete=False, suffix='.mp3') as temp_audio:
             temp_audio.write(audio_data)
             temp_audio_path = temp_audio.name
@@ -41,56 +33,48 @@ def transcribe_audio(audio_base64, language):
                 response_format="json",
                 language="ta" if language.lower() == "tamil" else "hi"
             )
-        
         os.unlink(temp_audio_path)
         return transcription.text
-    
     except Exception as e:
         raise Exception(f"Transcription error: {str(e)}")
 
-def analyze_with_gemini(transcript, language):
-    """Analyze transcript using Gemini for SOP validation, analytics, and keywords"""
-    
-    prompt = f"""You are an expert call center quality analyst. Analyze the following call transcript and provide structured analysis.
+def analyze_with_groq(transcript, language):
+    prompt = f"""You are a call center quality analyst. Analyze this transcript and return ONLY valid JSON (no markdown, no explanations):
 
-Language: {language}
 Transcript: {transcript}
 
-Return ONLY a valid JSON object (no markdown, no code blocks):
-
+Return this exact structure:
 {{
-  "summary": "Concise 2-3 sentence summary",
+  "summary": "2-3 sentence summary of the call",
   "sop_validation": {{
-    "greeting": true or false,
-    "identification": true or false,
-    "problemStatement": true or false,
-    "solutionOffering": true or false,
-    "closing": true or false,
-    "complianceScore": 0.0 to 1.0,
-    "adherenceStatus": "FOLLOWED" or "NOT_FOLLOWED",
-    "explanation": "Brief explanation"
+    "greeting": true,
+    "identification": false,
+    "problemStatement": true,
+    "solutionOffering": true,
+    "closing": false,
+    "complianceScore": 0.6,
+    "adherenceStatus": "NOT_FOLLOWED",
+    "explanation": "Missing identification and closing steps"
   }},
   "analytics": {{
-    "paymentPreference": "EMI" or "FULL_PAYMENT" or "PARTIAL_PAYMENT" or "DOWN_PAYMENT",
-    "rejectionReason": "HIGH_INTEREST" or "BUDGET_CONSTRAINTS" or "ALREADY_PAID" or "NOT_INTERESTED" or "NONE",
-    "sentiment": "Positive" or "Neutral" or "Negative"
+    "paymentPreference": "EMI",
+    "rejectionReason": "NONE",
+    "sentiment": "Positive"
   }},
-  "keywords": ["keyword1", "keyword2"]
+  "keywords": ["payment", "loan", "emi", "interest"]
 }}
 
-Rules:
-1. Return ONLY JSON, no other text
-2. Use lowercase booleans: true/false
-3. complianceScore = (count of true values) / 5
-4. adherenceStatus = "FOLLOWED" if all 5 true, else "NOT_FOLLOWED"
-5. rejectionReason = "NONE" if no rejection"""
+Return ONLY the JSON object, nothing else."""
 
     try:
-        model = genai.GenerativeModel('gemini-pro')
-        response = model.generate_content(prompt)
-        response_text = response.text.strip()
+        response = groq_client.chat.completions.create(
+            messages=[{"role": "user", "content": prompt}],
+            model="llama-3.1-70b-versatile",
+            temperature=0.3,
+            max_tokens=1500
+        )
         
-        # Remove markdown if present
+        response_text = response.choices[0].message.content.strip()
         response_text = re.sub(r'^```json\s*', '', response_text)
         response_text = re.sub(r'^```\s*', '', response_text)
         response_text = re.sub(r'\s*```$', '', response_text)
@@ -98,7 +82,6 @@ Rules:
         
         analysis = json.loads(response_text)
         
-        # Validate SOP structure
         if "sop_validation" in analysis:
             sop = analysis["sop_validation"]
             true_count = sum([
@@ -112,22 +95,16 @@ Rules:
             sop["adherenceStatus"] = "FOLLOWED" if true_count == 5 else "NOT_FOLLOWED"
         
         return analysis
-    
-    except json.JSONDecodeError as e:
-        raise Exception(f"Gemini returned invalid JSON: {str(e)}")
     except Exception as e:
-        raise Exception(f"Gemini analysis error: {str(e)}")
+        raise Exception(f"Analysis error: {str(e)}")
 
 @app.route('/api/call-analytics', methods=['POST'])
 def call_analytics():
-    """Main API endpoint for call analytics"""
-    
     if not verify_api_key():
         return jsonify({"error": "Unauthorized"}), 401
     
     try:
         data = request.get_json()
-        
         if not data:
             return jsonify({"error": "Invalid request body"}), 400
         
@@ -137,16 +114,12 @@ def call_analytics():
         if not audio_base64:
             return jsonify({"error": "Missing audioBase64 field"}), 400
         
-        # Step 1: Transcribe
         transcript = transcribe_audio(audio_base64, language)
-        
         if not transcript or not transcript.strip():
             return jsonify({"error": "Transcription failed or empty"}), 500
         
-        # Step 2: Analyze
-        analysis = analyze_with_gemini(transcript, language)
+        analysis = analyze_with_groq(transcript, language)
         
-        # Step 3: Build response
         return jsonify({
             "status": "success",
             "language": language,
@@ -156,16 +129,11 @@ def call_analytics():
             "analytics": analysis.get("analytics", {}),
             "keywords": analysis.get("keywords", [])
         }), 200
-    
     except Exception as e:
-        return jsonify({
-            "status": "error",
-            "error": str(e)
-        }), 500
+        return jsonify({"status": "error", "error": str(e)}), 500
 
 @app.route('/health', methods=['GET'])
 def health():
-    """Health check endpoint"""
     return jsonify({"status": "healthy"}), 200
 
 if __name__ == '__main__':
