@@ -86,7 +86,7 @@ Rules:
 5. rejectionReason = "NONE" if no rejection"""
 
     try:
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        model = genai.GenerativeModel('gemini-pro')
         response = model.generate_content(prompt)
         response_text = response.text.strip()
         
